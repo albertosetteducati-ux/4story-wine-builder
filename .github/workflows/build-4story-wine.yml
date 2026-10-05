@@ -1,4 +1,4 @@
-name: Build 4Story GameGuard Wine for Android x86_64 v3
+name: Build 4Story GameGuard Wine for Android x86_64 v4
 
 on:
   workflow_dispatch:
@@ -45,7 +45,7 @@ jobs:
       - name: Fetch GameNative Android build scripts and patches
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch proton_10.0 https://github.com/GameNative/proton-wine.git gamenative
+          git clone --depth 1 --branch proton_11.0 https://github.com/GameNative/proton-wine.git gamenative
           cp -a gamenative/build-scripts wine-src/
           mkdir -p wine-src/android
           cp -a gamenative/android/patches wine-src/android/
@@ -56,34 +56,33 @@ jobs:
           p = Path('wine-src/build-scripts/build-step-x86_64.sh')
           s = p.read_text()
 
-          marker = 'export SDL2_LIBS="-L$deps/lib -lSDL2"\n'
-          if marker in s and 'export FONTCONFIG_LIBS=' not in s:
-              s = s.replace(
-                  marker,
-                  marker + 'export FONTCONFIG_LIBS="-L$deps/lib -lfontconfig -lfreetype -lexpat"\n',
-                  1
-              )
+          loop_start = s.index('    for patch in "${PATCHES[@]}"; do')
+          end_marker = '    echo "----------------------------------------"\n    echo "Done applying patches."'
+          loop_end = s.index(end_marker, loop_start)
 
-          old = '        git apply ./android/patches/$patch\n'
-          new = (
-              '        PATCH_FILE="./android/patches/$patch"\n'
-              '        if git apply --check "$PATCH_FILE" 2>/dev/null; then\n'
-              '          git apply "$PATCH_FILE"\n'
-              '        elif git apply --reverse --check "$PATCH_FILE" 2>/dev/null; then\n'
-              '          echo "Already applied: $patch"\n'
+          replacement = (
+              '    for patch in "${PATCHES[@]}"; do\n'
+              '      echo "----------------------------------------"\n'
+              '      echo "Applying: $patch"\n'
+              '      PATCH_FILE="./android/patches/$patch"\n'
+              '\n'
+              '      if git apply --check "$PATCH_FILE" 2>/dev/null; then\n'
+              '        git apply "$PATCH_FILE"\n'
+              '        echo "SUCCESS: $patch applied"\n'
+              '      elif git apply --reverse --check "$PATCH_FILE" 2>/dev/null; then\n'
+              '        echo "Already applied: $patch"\n'
+              '      else\n'
+              '        echo "git apply context mismatch for $patch; trying GNU patch with fuzz..."\n'
+              '        if patch -p1 --forward --batch --fuzz=3 < "$PATCH_FILE"; then\n'
+              '          echo "SUCCESS with GNU patch: $patch"\n'
               '        else\n'
-              '          echo "git apply context mismatch for $patch; trying GNU patch with fuzz..."\n'
-              '          if patch -p1 --forward --batch --fuzz=3 < "$PATCH_FILE"; then\n'
-              '            echo "Applied with GNU patch: $patch"\n'
-              '          else\n'
-              '            echo "Android patch could not be rebased automatically: $patch" >&2\n'
-              '            exit 1\n'
-              '          fi\n'
+              '          echo "Android patch could not be rebased automatically: $patch" >&2\n'
+              '          exit 1\n'
               '        fi\n'
+              '      fi\n'
+              '    done\n\n'
           )
-          if old not in s:
-              raise SystemExit('Could not locate GameNative Android patch loop')
-          p.write_text(s.replace(old, new, 1))
+          p.write_text(s[:loop_start] + replacement + s[loop_end:])
           PY
 
       - name: Download Termux sysroot
@@ -196,8 +195,8 @@ jobs:
           cat > "$OUT/profile.json" <<'JSON'
           {
             "type": "Wine",
-            "versionName": "11.6-4story-gg-x86_64-v3",
-            "versionCode": 3,
+            "versionName": "11.6-4story-gg-x86_64-v4",
+            "versionCode": 4,
             "description": "Experimental Wine 11.6 Android x86_64 compatibility build for 4Story with GameGuard left enabled.",
             "files": [],
             "wine": {
@@ -209,17 +208,17 @@ jobs:
           JSON
 
           cd "$OUT"
-          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v3.wcp"             bin lib share prefixPack.txz profile.json
-          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v3.wcp.xz"             bin lib share prefixPack.txz profile.json
+          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v4.wcp"             bin lib share prefixPack.txz profile.json
+          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v4.wcp.xz"             bin lib share prefixPack.txz profile.json
           cd "$GITHUB_WORKSPACE"
-          sha256sum 4story-wine-11.6-gg-x86_64-v3.wcp* > SHA256SUMS
+          sha256sum 4story-wine-11.6-gg-x86_64-v4.wcp* > SHA256SUMS
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 4story-wine-11.6-gg-x86_64-v3
+          name: 4story-wine-11.6-gg-x86_64-v4
           path: |
-            4story-wine-11.6-gg-x86_64-v3.wcp
-            4story-wine-11.6-gg-x86_64-v3.wcp.xz
+            4story-wine-11.6-gg-x86_64-v4.wcp
+            4story-wine-11.6-gg-x86_64-v4.wcp.xz
             SHA256SUMS
           retention-days: 30
