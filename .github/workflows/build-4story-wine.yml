@@ -1,0 +1,208 @@
+name: Build 4Story GameGuard Wine for Android x86_64
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          df -h
+
+      - name: Install host dependencies
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential git wget curl unzip flex bison gettext autoconf automake libtool \
+            pkg-config mingw-w64 gcc-multilib g++-multilib xz-utils zstd python3 \
+            libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386 \
+            zlib1g-dev zlib1g-dev:i386
+
+      - name: Fetch and verify pristine Wine 11.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          WINE_URL='https://dl.winehq.org/wine/source/11.x/wine-11.6.tar.xz'
+          WINE_SHA='d49d166975478f609e6a9cdbda0a07c65a3b795e061fc454d3f1034c828d19e0'
+          curl -fL "$WINE_URL" -o wine-11.6.tar.xz
+          echo "$WINE_SHA  wine-11.6.tar.xz" | sha256sum -c -
+          tar -xJf wine-11.6.tar.xz
+          mv wine-11.6 wine-src
+          cd wine-src
+          git init -q
+          git add -A
+          git -c user.name=builder -c user.email=builder@localhost commit -qm pristine-wine-11.6
+
+      - name: Fetch GameNative Android build scripts and patches
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch proton_10.0 https://github.com/GameNative/proton-wine.git gamenative
+          cp -a gamenative/build-scripts wine-src/
+          mkdir -p wine-src/android
+          cp -a gamenative/android/patches wine-src/android/
+          chmod +x wine-src/build-scripts/*.sh
+
+          # Make GameNative's patch phase idempotent. We run configure once to
+          # lay down Android patches, then patch Wine for GameGuard and rerun
+          # configure so Makefile.in changes are regenerated.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('wine-src/build-scripts/build-step-x86_64.sh')
+          s = p.read_text()
+          old = '        git apply ./android/patches/$patch\n'
+          new = '''        if git apply --check ./android/patches/$patch 2>/dev/null; then\n          git apply ./android/patches/$patch\n        elif git apply --reverse --check ./android/patches/$patch 2>/dev/null; then\n          echo "Already applied: $patch"\n        else\n          echo "Android patch conflict: $patch" >&2\n          exit 1\n        fi\n'''
+          if old not in s:
+              raise SystemExit('Could not make Android patch loop idempotent')
+          p.write_text(s.replace(old, new, 1))
+          PY
+
+      - name: Download Termux sysroot
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/termuxfs/x86_64"
+          cd "$HOME/termuxfs/x86_64"
+          wget -q https://github.com/GameNative/termux-on-gha/releases/download/build-20260218/termuxfs-x86_64.tar
+          tar -xf termuxfs-x86_64.tar
+
+      - name: Set up Android NDK r27d
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/Android/Sdk/ndk"
+          cd "$HOME/Android/Sdk/ndk"
+          wget -q https://dl.google.com/android/repository/android-ndk-r27d-linux.zip
+          unzip -q android-ndk-r27d-linux.zip
+          mv android-ndk-r27d 27.3.13750724
+
+      - name: Set up LLVM MinGW
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/toolchains"
+          cd "$HOME/toolchains"
+          wget -q https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+          tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
+
+      - name: Build Wine host tools
+        working-directory: wine-src
+        run: |
+          set -euo pipefail
+          bash autogen.sh
+          bash build-scripts/build-step0.sh
+
+      - name: Apply GameNative Android source patches
+        working-directory: wine-src
+        run: |
+          set -euo pipefail
+          bash build-scripts/build-step-x86_64.sh --configure
+
+      - name: Download and verify upstream GameGuard compatibility patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gg-patches
+          BASE='https://raw.githubusercontent.com/Krzysztof977/mu-online-linux/v0.1.0/patches'
+          names=(
+            0001-ntdll-ntloaddriver-scm.patch
+            0002-ntdll-wow64-stack-semantics.patch
+            0003-kernelbase-urlescape-sentinel.patch
+            0004-ntoskrnl-gameguard-compat.patch
+          )
+          sums=(
+            128398b6cc9a8be12771df8636e6ab5db96dc68c2ed4dc275045211354e79ab8
+            507dcf28948909a3d869b58f5ff1aa1272a1c6b6abeb2d42e6350c6ae9cad8a0
+            98478fac80966bffac650a76e870ba1a39a809eb5d20d783dd8486cb9b628572
+            d40695dcc32b3f2f5343e4bf1eef5ae7a212da4fdb0f454209f0c1d833721399
+          )
+          for i in "${!names[@]}"; do
+            curl -fL "$BASE/${names[$i]}" -o "gg-patches/${names[$i]}"
+            echo "${sums[$i]}  gg-patches/${names[$i]}" | sha256sum -c -
+          done
+
+      - name: Apply GameGuard compatibility patches
+        working-directory: wine-src
+        run: |
+          set -euo pipefail
+          for p in ../gg-patches/*.patch; do
+            echo "Applying $p"
+            git apply --check "$p"
+            git apply "$p"
+          done
+
+      - name: Apply 4Story Toolhelp heap-list implementation
+        run: |
+          set -euo pipefail
+          python3 apply_4story_toolhelp.py wine-src
+          grep -n 'fetch_heap_list' wine-src/dlls/kernel32/toolhelp.c
+          ! grep -q 'Unimplemented: heap list snapshot' wine-src/dlls/kernel32/toolhelp.c
+          grep -q '@ stdcall Heap32ListNext(long ptr)' wine-src/dlls/kernel32/kernel32.spec
+          git -C wine-src diff --check
+
+      - name: Reconfigure after compatibility patches
+        working-directory: wine-src
+        run: |
+          set -euo pipefail
+          # The first configure applied Android patches. This second configure
+          # regenerates build files after the GameGuard patches add sources.
+          bash build-scripts/build-step-x86_64.sh --configure
+
+      - name: Build Android x86_64 Wine
+        working-directory: wine-src
+        run: |
+          set -euo pipefail
+          bash build-scripts/build-step-x86_64.sh --build
+          bash build-scripts/build-step-x86_64.sh --install
+
+      - name: Package Bannerlator / Winlator WCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$HOME/compiled-files-x86_64"
+          test -x "$OUT/bin/wine" || { echo 'wine binary missing'; exit 1; }
+          test -d "$OUT/lib/wine" || { echo 'Wine library tree missing'; exit 1; }
+
+          curl -fL https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-x86_64.txz -o "$OUT/prefixPack.txz"
+          cat > "$OUT/profile.json" <<'JSON'
+          {
+            "type": "Wine",
+            "versionName": "11.6-4story-gg-x86_64-v1",
+            "versionCode": 1,
+            "description": "Wine 11.6 Android x86_64: upstream GameGuard compatibility patches plus Toolhelp heap-list implementation for 4Story testing. Does not modify or bypass GameGuard.",
+            "files": [],
+            "wine": {
+              "binPath": "bin",
+              "libPath": "lib",
+              "prefixPack": "prefixPack.txz"
+            }
+          }
+          JSON
+
+          cd "$OUT"
+          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v1.wcp" \
+            bin lib share prefixPack.txz profile.json
+          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v1.wcp.xz" \
+            bin lib share prefixPack.txz profile.json
+          cd "$GITHUB_WORKSPACE"
+          sha256sum 4story-wine-11.6-gg-x86_64-v1.wcp* > SHA256SUMS
+          ls -lh 4story-wine-11.6-gg-x86_64-v1.wcp*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: 4story-wine-11.6-gg-x86_64-v1
+          path: |
+            4story-wine-11.6-gg-x86_64-v1.wcp
+            4story-wine-11.6-gg-x86_64-v1.wcp.xz
+            SHA256SUMS
+          retention-days: 30
