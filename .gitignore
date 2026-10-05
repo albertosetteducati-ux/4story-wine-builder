@@ -1,0 +1,4 @@
+*.wcp
+*.wcp.xz
+wine-src/
+gg-patches/
