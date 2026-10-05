@@ -1,4 +1,4 @@
-name: Build 4Story GameGuard GameNative Proton 11 x86_64 v6
+name: Build 4Story GameGuard GameNative Proton 11 x86_64 v7
 
 on:
   workflow_dispatch:
@@ -36,7 +36,13 @@ jobs:
           set -euo pipefail
           git clone --depth 1 --branch proton_11.0 \
             https://github.com/GameNative/proton-wine.git wine-src
-          git -C wine-src rev-parse HEAD
+          EXPECTED_GAMENATIVE_SHA='f7c016668db739f563e3d4781c27ed085843d63a'
+          ACTUAL_GAMENATIVE_SHA="$(git -C wine-src rev-parse HEAD)"
+          echo "GameNative Proton 11 commit: $ACTUAL_GAMENATIVE_SHA"
+          test "$ACTUAL_GAMENATIVE_SHA" = "$EXPECTED_GAMENATIVE_SHA" || {
+            echo "Unexpected GameNative proton_11.0 commit" >&2
+            exit 1
+          }
           grep -F "Wine version 11.0" wine-src/VERSION
 
       - name: Download and verify GameGuard compatibility patches
@@ -97,7 +103,10 @@ jobs:
           wow_call = "virtual_alloc_thread_stack( &stack, 0, limit, reserve_size, commit_size, TRUE )"
 
           checks = {
-              "ntdll Makefile anchor": "\\tdebugbuffer.c \\\n\\tenv.c \\\n" in mf,
+              "ntdll Makefile anchor":
+                  ("\tdebugbuffer.c \\" in mf.splitlines() and
+                   "\tenv.c \\" in mf.splitlines() and
+                   "\tdriver.c \\" not in mf.splitlines()),
               "NtLoadDriver export": "@ stdcall -syscall NtLoadDriver(ptr)" in spec,
               "NtUnloadDriver export": "@ stdcall -syscall NtUnloadDriver(ptr)" in spec,
 
@@ -113,14 +122,14 @@ jobs:
               "0002 implementation signature":
                   "SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page )" in virt,
               "0002 guard-page anchor":
-                  "    /* setup no access guard page */\\n    if (guard_page)\\n    {\\n" in virt,
+                  "    /* setup no access guard page */\n    if (guard_page)\n    {\n" in virt,
               "0002 StackLimit anchor":
                   "    stack->StackLimit = (char *)view->base + (guard_page ? 2 * host_page_size : 0);" in virt,
               "Android virtual patch does not overlap 0002 stack function":
                   "virtual_alloc_thread_stack" not in android_virt,
 
-              "Toolhelp snapshot struct": "    int         module_offset;\\n    char        data[1];\\n" in th,
-              "Toolhelp locals": "    ULONG               num_pcs, num_thd, num_mod;\\n" in th,
+              "Toolhelp snapshot struct": "    int         module_offset;\n    char        data[1];\n" in th,
+              "Toolhelp locals": "    ULONG               num_pcs, num_thd, num_mod;\n" in th,
               "Toolhelp flags": "if (!(flags & (TH32CS_SNAPPROCESS|TH32CS_SNAPTHREAD|TH32CS_SNAPMODULE)))" in th,
               "Toolhelp heap FIXME": 'if (flags & TH32CS_SNAPHEAPLIST)FIXME("Unimplemented: heap list snapshot\\n");' in th,
               "Heap32ListFirst stub": 'BOOL WINAPI Heap32ListFirst(HANDLE hSnapshot, LPHEAPLIST32 lphl)' in th,
@@ -252,7 +261,7 @@ jobs:
           priv = once(
               priv,
               "SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page );",
-              "SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page,\\n"
+              "SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page,\n"
               "                                            BOOL use_commit_size );",
               "virtual_alloc_thread_stack prototype"
           )
@@ -262,36 +271,36 @@ jobs:
           virt = once(
               virt,
               "SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page )",
-              "SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page,\\n"
+              "SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page,\n"
               "                                     BOOL use_commit_size )",
               "virtual_alloc_thread_stack implementation signature"
           )
 
-          guard_anchor = "    /* setup no access guard page */\\n    if (guard_page)\\n    {\\n"
+          guard_anchor = "    /* setup no access guard page */\n    if (guard_page)\n    {\n"
           guard_new = (
-              "    /* setup no access guard page */\\n"
-              "    if (guard_page && use_commit_size)\\n"
-              "    {\\n"
-              "        char *stack_base = (char *)view->base + view->size;\\n"
-              "        char *stack_limit = stack_base - commit_size;\\n"
-              "        char *guard = stack_limit - host_page_size;\\n\\n"
-              "        /* Keep the full stack mapping committed as in stock Wine. */\\n"
-              "        set_page_vprot( view->base, host_page_size, 0 );\\n"
-              "        set_page_vprot( guard, host_page_size,\\n"
-              "                        VPROT_READ | VPROT_WRITE | VPROT_COMMITTED | VPROT_GUARD );\\n"
-              "        mprotect_range( view->base, host_page_size, 0, 0 );\\n"
-              "        mprotect_range( guard, host_page_size, 0, 0 );\\n"
-              "    }\\n"
-              "    else if (guard_page)\\n"
-              "    {\\n"
+              "    /* setup no access guard page */\n"
+              "    if (guard_page && use_commit_size)\n"
+              "    {\n"
+              "        char *stack_base = (char *)view->base + view->size;\n"
+              "        char *stack_limit = stack_base - commit_size;\n"
+              "        char *guard = stack_limit - host_page_size;\n\n"
+              "        /* Keep the full stack mapping committed as in stock Wine. */\n"
+              "        set_page_vprot( view->base, host_page_size, 0 );\n"
+              "        set_page_vprot( guard, host_page_size,\n"
+              "                        VPROT_READ | VPROT_WRITE | VPROT_COMMITTED | VPROT_GUARD );\n"
+              "        mprotect_range( view->base, host_page_size, 0, 0 );\n"
+              "        mprotect_range( guard, host_page_size, 0, 0 );\n"
+              "    }\n"
+              "    else if (guard_page)\n"
+              "    {\n"
           )
           virt = once(virt, guard_anchor, guard_new, "guard-page block")
 
           stack_limit = "    stack->StackLimit = (char *)view->base + (guard_page ? 2 * host_page_size : 0);"
           stack_limit_new = (
-              "    if (use_commit_size)\\n"
-              "        stack->StackLimit = (char *)stack->StackBase - commit_size;\\n"
-              "    else\\n"
+              "    if (use_commit_size)\n"
+              "        stack->StackLimit = (char *)stack->StackBase - commit_size;\n"
+              "    else\n"
               "        stack->StackLimit = (char *)view->base + (guard_page ? 2 * host_page_size : 0);"
           )
           virt = once(virt, stack_limit, stack_limit_new, "StackLimit assignment")
@@ -628,8 +637,8 @@ jobs:
           cat > "$OUT/profile.json" <<'JSON'
           {
             "type": "Wine",
-            "versionName": "11.0-4story-gg-x86_64-v6",
-            "versionCode": 6,
+            "versionName": "11.0-4story-gg-x86_64-v7",
+            "versionCode": 7,
             "description": "GameNative Proton 11 Android x86_64 with GameGuard compatibility work and Toolhelp heap-list support. GameGuard remains enabled.",
             "files": [],
             "wine": {
@@ -641,16 +650,16 @@ jobs:
           JSON
 
           cd "$OUT"
-          tar cJf "$GITHUB_WORKSPACE/4story-gamenative-p11-gg-x86_64-v6.wcp" \
+          tar cJf "$GITHUB_WORKSPACE/4story-gamenative-p11-gg-x86_64-v7.wcp" \
             bin lib share prefixPack.txz profile.json
           cd "$GITHUB_WORKSPACE"
-          sha256sum 4story-gamenative-p11-gg-x86_64-v6.wcp > SHA256SUMS
+          sha256sum 4story-gamenative-p11-gg-x86_64-v7.wcp > SHA256SUMS
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 4story-gamenative-p11-gg-x86_64-v6
+          name: 4story-gamenative-p11-gg-x86_64-v7
           path: |
-            4story-gamenative-p11-gg-x86_64-v6.wcp
+            4story-gamenative-p11-gg-x86_64-v7.wcp
             SHA256SUMS
           retention-days: 30
