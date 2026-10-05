@@ -1,5 +1,4 @@
-# v2: fixes host-tools step (no autogen.sh in pristine Wine tarball) and uses GameNative x86_64 Wine 11 prefix pack.
-name: Build 4Story GameGuard Wine for Android x86_64 (v2)
+name: Build 4Story GameGuard Wine for Android x86_64 v3
 
 on:
   workflow_dispatch:
@@ -26,11 +25,7 @@ jobs:
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential git wget curl unzip flex bison gettext autoconf automake libtool \
-            pkg-config mingw-w64 gcc-multilib g++-multilib xz-utils zstd python3 \
-            libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386 \
-            zlib1g-dev zlib1g-dev:i386
+          sudo apt-get install -y             build-essential git wget curl unzip flex bison gettext autoconf automake libtool patch             pkg-config mingw-w64 gcc-multilib g++-multilib xz-utils zstd python3             libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386             zlib1g-dev zlib1g-dev:i386
 
       - name: Fetch and verify pristine Wine 11.6
         shell: bash
@@ -56,17 +51,38 @@ jobs:
           cp -a gamenative/android/patches wine-src/android/
           chmod +x wine-src/build-scripts/*.sh
 
-          # Make GameNative's patch phase idempotent. We run configure once to
-          # lay down Android patches, then patch Wine for GameGuard and rerun
-          # configure so Makefile.in changes are regenerated.
           python3 - <<'PY'
           from pathlib import Path
           p = Path('wine-src/build-scripts/build-step-x86_64.sh')
           s = p.read_text()
+
+          marker = 'export SDL2_LIBS="-L$deps/lib -lSDL2"\n'
+          if marker in s and 'export FONTCONFIG_LIBS=' not in s:
+              s = s.replace(
+                  marker,
+                  marker + 'export FONTCONFIG_LIBS="-L$deps/lib -lfontconfig -lfreetype -lexpat"\n',
+                  1
+              )
+
           old = '        git apply ./android/patches/$patch\n'
-          new = '''        if git apply --check ./android/patches/$patch 2>/dev/null; then\n          git apply ./android/patches/$patch\n        elif git apply --reverse --check ./android/patches/$patch 2>/dev/null; then\n          echo "Already applied: $patch"\n        else\n          echo "Android patch conflict: $patch" >&2\n          exit 1\n        fi\n'''
+          new = (
+              '        PATCH_FILE="./android/patches/$patch"\n'
+              '        if git apply --check "$PATCH_FILE" 2>/dev/null; then\n'
+              '          git apply "$PATCH_FILE"\n'
+              '        elif git apply --reverse --check "$PATCH_FILE" 2>/dev/null; then\n'
+              '          echo "Already applied: $patch"\n'
+              '        else\n'
+              '          echo "git apply context mismatch for $patch; trying GNU patch with fuzz..."\n'
+              '          if patch -p1 --forward --batch --fuzz=3 < "$PATCH_FILE"; then\n'
+              '            echo "Applied with GNU patch: $patch"\n'
+              '          else\n'
+              '            echo "Android patch could not be rebased automatically: $patch" >&2\n'
+              '            exit 1\n'
+              '          fi\n'
+              '        fi\n'
+          )
           if old not in s:
-              raise SystemExit('Could not make Android patch loop idempotent')
+              raise SystemExit('Could not locate GameNative Android patch loop')
           p.write_text(s.replace(old, new, 1))
           PY
 
@@ -99,7 +115,6 @@ jobs:
         working-directory: wine-src
         run: |
           set -euo pipefail
-          test -x ./configure
           bash build-scripts/build-step0.sh
 
       - name: Apply GameNative Android source patches
@@ -107,6 +122,7 @@ jobs:
         run: |
           set -euo pipefail
           bash build-scripts/build-step-x86_64.sh --configure
+          git diff --check
 
       - name: Download and verify upstream GameGuard compatibility patches
         shell: bash
@@ -137,9 +153,14 @@ jobs:
           set -euo pipefail
           for p in ../gg-patches/*.patch; do
             echo "Applying $p"
-            git apply --check "$p"
-            git apply "$p"
+            if git apply --check "$p" 2>/dev/null; then
+              git apply "$p"
+            else
+              echo "GameGuard patch context drift; trying GNU patch: $p"
+              patch -p1 --forward --batch --fuzz=3 < "$p"
+            fi
           done
+          git diff --check
 
       - name: Apply 4Story Toolhelp heap-list implementation
         run: |
@@ -154,8 +175,6 @@ jobs:
         working-directory: wine-src
         run: |
           set -euo pipefail
-          # The first configure applied Android patches. This second configure
-          # regenerates build files after the GameGuard patches add sources.
           bash build-scripts/build-step-x86_64.sh --configure
 
       - name: Build Android x86_64 Wine
@@ -177,9 +196,9 @@ jobs:
           cat > "$OUT/profile.json" <<'JSON'
           {
             "type": "Wine",
-            "versionName": "11.6-4story-gg-x86_64-v2",
-            "versionCode": 1,
-            "description": "Wine 11.6 Android x86_64: upstream GameGuard compatibility patches plus Toolhelp heap-list implementation for 4Story testing. Does not modify or bypass GameGuard.",
+            "versionName": "11.6-4story-gg-x86_64-v3",
+            "versionCode": 3,
+            "description": "Experimental Wine 11.6 Android x86_64 compatibility build for 4Story with GameGuard left enabled.",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -190,20 +209,17 @@ jobs:
           JSON
 
           cd "$OUT"
-          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v2.wcp" \
-            bin lib share prefixPack.txz profile.json
-          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v2.wcp.xz" \
-            bin lib share prefixPack.txz profile.json
+          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v3.wcp"             bin lib share prefixPack.txz profile.json
+          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v3.wcp.xz"             bin lib share prefixPack.txz profile.json
           cd "$GITHUB_WORKSPACE"
-          sha256sum 4story-wine-11.6-gg-x86_64-v2.wcp* > SHA256SUMS
-          ls -lh 4story-wine-11.6-gg-x86_64-v2.wcp*
+          sha256sum 4story-wine-11.6-gg-x86_64-v3.wcp* > SHA256SUMS
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 4story-wine-11.6-gg-x86_64-v2
+          name: 4story-wine-11.6-gg-x86_64-v3
           path: |
-            4story-wine-11.6-gg-x86_64-v2.wcp
-            4story-wine-11.6-gg-x86_64-v2.wcp.xz
+            4story-wine-11.6-gg-x86_64-v3.wcp
+            4story-wine-11.6-gg-x86_64-v3.wcp.xz
             SHA256SUMS
           retention-days: 30
