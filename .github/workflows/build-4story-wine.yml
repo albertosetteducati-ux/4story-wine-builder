@@ -1,4 +1,4 @@
-name: Build 4Story GameGuard Wine for Android x86_64 v4
+name: Build 4Story GameGuard GameNative Proton 11 x86_64 v5
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: Checkout this repository
+      - name: Checkout builder repository
         uses: actions/checkout@v4
 
       - name: Free disk space
@@ -25,67 +25,410 @@ jobs:
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install -y             build-essential git wget curl unzip flex bison gettext autoconf automake libtool patch             pkg-config mingw-w64 gcc-multilib g++-multilib xz-utils zstd python3             libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386             zlib1g-dev zlib1g-dev:i386
+          sudo apt-get install -y \
+            build-essential git wget curl unzip flex bison gettext autoconf automake libtool \
+            pkg-config mingw-w64 gcc-multilib g++-multilib xz-utils zstd python3 \
+            libfreetype6-dev libfreetype6-dev:i386 libpng-dev libpng-dev:i386 \
+            zlib1g-dev zlib1g-dev:i386
 
-      - name: Fetch and verify pristine Wine 11.6
-        shell: bash
+      - name: Clone exact GameNative Proton 11 source
         run: |
           set -euo pipefail
-          WINE_URL='https://dl.winehq.org/wine/source/11.x/wine-11.6.tar.xz'
-          WINE_SHA='d49d166975478f609e6a9cdbda0a07c65a3b795e061fc454d3f1034c828d19e0'
-          curl -fL "$WINE_URL" -o wine-11.6.tar.xz
-          echo "$WINE_SHA  wine-11.6.tar.xz" | sha256sum -c -
-          tar -xJf wine-11.6.tar.xz
-          mv wine-11.6 wine-src
-          cd wine-src
-          git init -q
-          git add -A
-          git -c user.name=builder -c user.email=builder@localhost commit -qm pristine-wine-11.6
+          git clone --depth 1 --branch proton_11.0 \
+            https://github.com/GameNative/proton-wine.git wine-src
+          git -C wine-src rev-parse HEAD
+          grep -F "Wine version 11.0" wine-src/VERSION
 
-      - name: Fetch GameNative Android build scripts and patches
+      - name: Download and verify GameGuard compatibility patches
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch proton_11.0 https://github.com/GameNative/proton-wine.git gamenative
-          cp -a gamenative/build-scripts wine-src/
-          mkdir -p wine-src/android
-          cp -a gamenative/android/patches wine-src/android/
-          chmod +x wine-src/build-scripts/*.sh
-
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('wine-src/build-scripts/build-step-x86_64.sh')
-          s = p.read_text()
-
-          loop_start = s.index('    for patch in "${PATCHES[@]}"; do')
-          end_marker = '    echo "----------------------------------------"\n    echo "Done applying patches."'
-          loop_end = s.index(end_marker, loop_start)
-
-          replacement = (
-              '    for patch in "${PATCHES[@]}"; do\n'
-              '      echo "----------------------------------------"\n'
-              '      echo "Applying: $patch"\n'
-              '      PATCH_FILE="./android/patches/$patch"\n'
-              '\n'
-              '      if git apply --check "$PATCH_FILE" 2>/dev/null; then\n'
-              '        git apply "$PATCH_FILE"\n'
-              '        echo "SUCCESS: $patch applied"\n'
-              '      elif git apply --reverse --check "$PATCH_FILE" 2>/dev/null; then\n'
-              '        echo "Already applied: $patch"\n'
-              '      else\n'
-              '        echo "git apply context mismatch for $patch; trying GNU patch with fuzz..."\n'
-              '        if patch -p1 --forward --batch --fuzz=3 < "$PATCH_FILE"; then\n'
-              '          echo "SUCCESS with GNU patch: $patch"\n'
-              '        else\n'
-              '          echo "Android patch could not be rebased automatically: $patch" >&2\n'
-              '          exit 1\n'
-              '        fi\n'
-              '      fi\n'
-              '    done\n\n'
+          mkdir -p gg-patches
+          BASE='https://raw.githubusercontent.com/Krzysztof977/mu-online-linux/v0.1.0/patches'
+          names=(
+            0001-ntdll-ntloaddriver-scm.patch
+            0002-ntdll-wow64-stack-semantics.patch
+            0003-kernelbase-urlescape-sentinel.patch
+            0004-ntoskrnl-gameguard-compat.patch
           )
-          p.write_text(s[:loop_start] + replacement + s[loop_end:])
+          sums=(
+            128398b6cc9a8be12771df8636e6ab5db96dc68c2ed4dc275045211354e79ab8
+            507dcf28948909a3d869b58f5ff1aa1272a1c6b6abeb2d42e6350c6ae9cad8a0
+            98478fac80966bffac650a76e870ba1a39a809eb5d20d783dd8486cb9b628572
+            d40695dcc32b3f2f5343e4bf1eef5ae7a212da4fdb0f454209f0c1d833721399
+          )
+          for i in "${!names[@]}"; do
+            curl -fL "$BASE/${names[$i]}" -o "gg-patches/${names[$i]}"
+            echo "${sums[$i]}  gg-patches/${names[$i]}" | sha256sum -c -
+          done
+
+      - name: Preflight ALL custom compatibility changes
+        run: |
+          set -euo pipefail
+          failures=0
+
+          for p in \
+            gg-patches/0002-ntdll-wow64-stack-semantics.patch \
+            gg-patches/0003-kernelbase-urlescape-sentinel.patch \
+            gg-patches/0004-ntoskrnl-gameguard-compat.patch
+          do
+            if git -C wine-src apply --check "../$p"; then
+              echo "OK: $p"
+            else
+              echo "FAIL: $p"
+              failures=$((failures+1))
+            fi
+          done
+
+          python3 - <<'PY' || failures=$((failures+1))
+          from pathlib import Path
+
+          root = Path("wine-src")
+          mf = (root / "dlls/ntdll/Makefile.in").read_text()
+          spec = (root / "dlls/ntdll/ntdll.spec").read_text()
+          th = (root / "dlls/kernel32/toolhelp.c").read_text()
+          kspec = (root / "dlls/kernel32/kernel32.spec").read_text()
+
+          checks = {
+              "ntdll Makefile anchor": "\tdebugbuffer.c \\\n\tenv.c \\\n" in mf,
+              "NtLoadDriver export": "@ stdcall -syscall NtLoadDriver(ptr)" in spec,
+              "NtUnloadDriver export": "@ stdcall -syscall NtUnloadDriver(ptr)" in spec,
+              "Toolhelp snapshot struct": "    int         module_offset;\n    char        data[1];\n" in th,
+              "Toolhelp locals": "    ULONG               num_pcs, num_thd, num_mod;\n" in th,
+              "Toolhelp flags": "if (!(flags & (TH32CS_SNAPPROCESS|TH32CS_SNAPTHREAD|TH32CS_SNAPMODULE)))" in th,
+              "Toolhelp heap FIXME": 'if (flags & TH32CS_SNAPHEAPLIST)FIXME("Unimplemented: heap list snapshot\\n");' in th,
+              "Heap32ListFirst stub": 'BOOL WINAPI Heap32ListFirst(HANDLE hSnapshot, LPHEAPLIST32 lphl)' in th,
+              "Heap32ListNext spec stub": "@ stub Heap32ListNext" in kspec,
+          }
+
+          bad = [name for name, ok in checks.items() if not ok]
+          for name, ok in checks.items():
+              print(("OK: " if ok else "FAIL: ") + name)
+          if bad:
+              raise SystemExit("Preflight failed: " + ", ".join(bad))
           PY
 
-      - name: Download Termux sysroot
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::$failures compatibility preflight group(s) failed. Nothing was built."
+            exit 1
+          fi
+
+      - name: Apply NtLoadDriver port for GameNative Proton 11
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("wine-src")
+          patch = Path("gg-patches/0001-ntdll-ntloaddriver-scm.patch").read_text().splitlines()
+
+          marker = "+++ b/dlls/ntdll/driver.c"
+          i = patch.index(marker) + 1
+          while i < len(patch) and not patch[i].startswith("@@"):
+              i += 1
+          if i == len(patch):
+              raise SystemExit("driver.c hunk not found")
+          i += 1
+
+          out = []
+          while i < len(patch):
+              line = patch[i]
+              if line.startswith("--- a/") or line.startswith("--- /dev/null"):
+                  break
+              if line.startswith("+") and not line.startswith("+++"):
+                  out.append(line[1:])
+              elif line.startswith(" "):
+                  out.append(line[1:])
+              i += 1
+
+          driver = "\n".join(out) + "\n"
+          if "NTSTATUS WINAPI NtLoadDriver" not in driver or "NTSTATUS WINAPI NtUnloadDriver" not in driver:
+              raise SystemExit("extracted driver.c is incomplete")
+          (root / "dlls/ntdll/driver.c").write_text(driver)
+
+          mf_path = root / "dlls/ntdll/Makefile.in"
+          mf = mf_path.read_text()
+          old = "\tdebugbuffer.c \\\n\tenv.c \\\n"
+          new = "\tdebugbuffer.c \\\n\tdriver.c \\\n\tenv.c \\\n"
+          if old not in mf:
+              raise SystemExit("ntdll Makefile anchor changed")
+          mf_path.write_text(mf.replace(old, new, 1))
+
+          spec_path = root / "dlls/ntdll/ntdll.spec"
+          spec = spec_path.read_text()
+          for old, new in (
+              ("@ stdcall -syscall NtLoadDriver(ptr)", "@ stdcall NtLoadDriver(ptr)"),
+              ("@ stdcall -syscall NtUnloadDriver(ptr)", "@ stdcall NtUnloadDriver(ptr)"),
+          ):
+              if old not in spec:
+                  raise SystemExit("ntdll.spec anchor missing: " + old)
+              spec = spec.replace(old, new, 1)
+          spec_path.write_text(spec)
+          PY
+
+      - name: Apply remaining GameGuard compatibility patches
+        run: |
+          set -euo pipefail
+          git -C wine-src apply ../gg-patches/0002-ntdll-wow64-stack-semantics.patch
+          git -C wine-src apply ../gg-patches/0003-kernelbase-urlescape-sentinel.patch
+          git -C wine-src apply ../gg-patches/0004-ntoskrnl-gameguard-compat.patch
+
+      - name: Apply Toolhelp heap-list implementation
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          root = Path("wine-src")
+          toolhelp = root / "dlls/kernel32/toolhelp.c"
+          spec = root / "dlls/kernel32/kernel32.spec"
+          text = toolhelp.read_text()
+
+          def rep(old, new, label):
+              global text
+              if old not in text:
+                  raise SystemExit(label + ": anchor not found")
+              text = text.replace(old, new, 1)
+
+          rep(
+              "    int         module_count;\n"
+              "    int         module_pos;\n"
+              "    int         module_offset;\n"
+              "    char        data[1];\n",
+              "    int         module_count;\n"
+              "    int         module_pos;\n"
+              "    int         module_offset;\n"
+              "    int         heap_count;\n"
+              "    int         heap_pos;\n"
+              "    int         heap_offset;\n"
+              "    char        data[1];\n",
+              "snapshot layout"
+          )
+
+          anchor = "static BOOL fetch_process_thread( DWORD flags, SYSTEM_PROCESS_INFORMATION** pspi,\n"
+          if anchor not in text:
+              raise SystemExit("fetch_process_thread anchor not found")
+
+          helpers = r'''/*
+           * Read Toolhelp heap identifiers from the target PEB.
+           */
+          static BOOL fetch_heap_list( DWORD process, DWORD flags, HEAPLIST32 **heap_list, ULONG *num )
+          {
+              PROCESS_BASIC_INFORMATION pbi;
+              HANDLE hProcess;
+              PVOID *heaps = NULL;
+              PEB peb;
+              ULONG i;
+              BOOL ret = FALSE;
+          
+              *heap_list = NULL;
+              *num = 0;
+              if (!(flags & TH32CS_SNAPHEAPLIST)) return TRUE;
+          
+              if (process)
+              {
+                  hProcess = OpenProcess( PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, process );
+                  if (!hProcess) return FALSE;
+              }
+              else hProcess = GetCurrentProcess();
+          
+              if (!set_ntstatus( NtQueryInformationProcess( hProcess, ProcessBasicInformation,
+                                                  &pbi, sizeof(pbi), NULL )))
+                  goto out;
+              if (!ReadProcessMemory( hProcess, pbi.PebBaseAddress, &peb, sizeof(peb), NULL ))
+                  goto out;
+          
+              if (!peb.NumberOfHeaps)
+              {
+                  ret = TRUE;
+                  goto out;
+              }
+              if (peb.NumberOfHeaps > 0x10000)
+              {
+                  SetLastError( ERROR_BAD_LENGTH );
+                  goto out;
+              }
+          
+              heaps = HeapAlloc( GetProcessHeap(), 0, peb.NumberOfHeaps * sizeof(*heaps) );
+              if (!heaps)
+              {
+                  SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+                  goto out;
+              }
+              if (!ReadProcessMemory( hProcess, peb.ProcessHeaps, heaps,
+                            peb.NumberOfHeaps * sizeof(*heaps), NULL ))
+                  goto out;
+          
+              *heap_list = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY,
+                            peb.NumberOfHeaps * sizeof(**heap_list) );
+              if (!*heap_list)
+              {
+                  SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+                  goto out;
+              }
+          
+              for (i = 0; i < peb.NumberOfHeaps; ++i)
+              {
+                  (*heap_list)[i].dwSize = sizeof(HEAPLIST32);
+                  (*heap_list)[i].th32ProcessID = process ? process : GetCurrentProcessId();
+                  (*heap_list)[i].th32HeapID = (ULONG_PTR)heaps[i];
+                  (*heap_list)[i].dwFlags = (heaps[i] == peb.ProcessHeap) ? HF32_DEFAULT : 0;
+              }
+          
+              *num = peb.NumberOfHeaps;
+              ret = TRUE;
+          
+          out:
+              if (!ret)
+              {
+                  HeapFree( GetProcessHeap(), 0, *heap_list );
+                  *heap_list = NULL;
+                  *num = 0;
+              }
+              HeapFree( GetProcessHeap(), 0, heaps );
+              if (process) CloseHandle( hProcess );
+              return ret;
+          }
+          
+          static void fill_heap_list( struct snapshot *snap, ULONG *offset, HEAPLIST32 *heap_list, ULONG num )
+          {
+              snap->heap_count = num;
+              snap->heap_pos = 0;
+              if (!num) return;
+              snap->heap_offset = *offset;
+              memcpy( &snap->data[*offset], heap_list, num * sizeof(*heap_list) );
+              *offset += num * sizeof(*heap_list);
+          }
+          
+          '''
+          text = text.replace(anchor, helpers + anchor, 1)
+
+          rep(
+              "    SYSTEM_PROCESS_INFORMATION* spi = NULL;\n"
+              "    LDR_DATA_TABLE_ENTRY *mod = NULL;\n"
+              "    ULONG               num_pcs, num_thd, num_mod;\n",
+              "    SYSTEM_PROCESS_INFORMATION* spi = NULL;\n"
+              "    LDR_DATA_TABLE_ENTRY *mod = NULL;\n"
+              "    HEAPLIST32          *heap_list = NULL;\n"
+              "    ULONG               num_pcs = 0, num_thd = 0, num_mod = 0, num_heap = 0;\n",
+              "snapshot locals"
+          )
+
+          rep(
+              "if (!(flags & (TH32CS_SNAPPROCESS|TH32CS_SNAPTHREAD|TH32CS_SNAPMODULE)))",
+              "if (!(flags & (TH32CS_SNAPPROCESS|TH32CS_SNAPTHREAD|TH32CS_SNAPMODULE|TH32CS_SNAPHEAPLIST)))",
+              "supported flags"
+          )
+
+          rep(
+              "    if (fetch_module( process, flags, &mod, &num_mod ) &&\n"
+              "        fetch_process_thread( flags, &spi, &num_pcs, &num_thd ))\n",
+              "    if (fetch_module( process, flags, &mod, &num_mod ) &&\n"
+              "        fetch_process_thread( flags, &spi, &num_pcs, &num_thd ) &&\n"
+              "        fetch_heap_list( process, flags, &heap_list, &num_heap ))\n",
+              "snapshot fetch chain"
+          )
+
+          rep(
+              '        if (flags & TH32CS_SNAPHEAPLIST)FIXME("Unimplemented: heap list snapshot\\n");\n',
+              '        if (flags & TH32CS_SNAPHEAPLIST) sect_size += num_heap * sizeof(HEAPLIST32);\n',
+              "heap snapshot allocation"
+          )
+
+          rep(
+              "            fill_module( snap, &offset, process, mod, num_mod );\n"
+              "            fill_process( snap, &offset, spi, num_pcs );\n"
+              "            fill_thread( snap, &offset, spi, num_thd );\n",
+              "            fill_module( snap, &offset, process, mod, num_mod );\n"
+              "            fill_process( snap, &offset, spi, num_pcs );\n"
+              "            fill_thread( snap, &offset, spi, num_thd );\n"
+              "            fill_heap_list( snap, &offset, heap_list, num_heap );\n",
+              "snapshot fill"
+          )
+
+          rep(
+              "    HeapFree( GetProcessHeap(), 0, mod );\n"
+              "    HeapFree( GetProcessHeap(), 0, spi );\n\n"
+              "    if (!hSnapShot) return INVALID_HANDLE_VALUE;\n",
+              "    HeapFree( GetProcessHeap(), 0, mod );\n"
+              "    HeapFree( GetProcessHeap(), 0, spi );\n"
+              "    HeapFree( GetProcessHeap(), 0, heap_list );\n\n"
+              "    if (!hSnapShot) return INVALID_HANDLE_VALUE;\n",
+              "snapshot cleanup"
+          )
+
+          old_stub = '''/************************************************************************
+           *              Heap32ListFirst (KERNEL32.@)
+           *
+           */
+          BOOL WINAPI Heap32ListFirst(HANDLE hSnapshot, LPHEAPLIST32 lphl)
+          {
+              FIXME(": stub\\n");
+              return FALSE;
+          }
+          '''
+          new_stub = '''/************************************************************************
+           *              heap_list_next
+           */
+          static BOOL heap_list_next( HANDLE hSnapshot, LPHEAPLIST32 lphl, BOOL first )
+          {
+              struct snapshot *snap;
+              BOOL ret = FALSE;
+          
+              if (lphl->dwSize < sizeof(HEAPLIST32))
+              {
+                  SetLastError( ERROR_INSUFFICIENT_BUFFER );
+                  WARN("Result buffer too small (%lu)\\n", lphl->dwSize );
+                  return FALSE;
+              }
+          
+              if ((snap = MapViewOfFile( hSnapshot, FILE_MAP_ALL_ACCESS, 0, 0, 0 )))
+              {
+                  if (first) snap->heap_pos = 0;
+                  if (snap->heap_pos < snap->heap_count)
+                  {
+            LPHEAPLIST32 he = (HEAPLIST32 *)&snap->data[snap->heap_offset];
+            *lphl = he[snap->heap_pos++];
+            ret = TRUE;
+                  }
+                  else SetLastError( ERROR_NO_MORE_FILES );
+                  UnmapViewOfFile( snap );
+              }
+              return ret;
+          }
+          
+          /************************************************************************
+           *              Heap32ListFirst (KERNEL32.@)
+           */
+          BOOL WINAPI Heap32ListFirst( HANDLE hSnapshot, LPHEAPLIST32 lphl )
+          {
+              return heap_list_next( hSnapshot, lphl, TRUE );
+          }
+          
+          /************************************************************************
+           *              Heap32ListNext (KERNEL32.@)
+           */
+          BOOL WINAPI Heap32ListNext( HANDLE hSnapshot, LPHEAPLIST32 lphl )
+          {
+              return heap_list_next( hSnapshot, lphl, FALSE );
+          }
+          '''
+          if old_stub not in text:
+              raise SystemExit("Heap32ListFirst stub anchor not found")
+          text = text.replace(old_stub, new_stub, 1)
+
+          toolhelp.write_text(text)
+
+          spec_text = spec.read_text()
+          if "@ stub Heap32ListNext" not in spec_text:
+              raise SystemExit("kernel32.spec Heap32ListNext stub not found")
+          spec.write_text(spec_text.replace("@ stub Heap32ListNext",
+                                            "@ stdcall Heap32ListNext(long ptr)", 1))
+          PY
+
+          git -C wine-src diff --check
+
+      - name: Set up Termux sysroot
         run: |
           set -euo pipefail
           mkdir -p "$HOME/termuxfs/x86_64"
@@ -110,94 +453,53 @@ jobs:
           wget -q https://github.com/bylaws/llvm-mingw/releases/download/20250920/llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
           tar -xf llvm-mingw-20250920-ucrt-ubuntu-22.04-x86_64.tar.xz
 
+      - name: GameNative official autogen
+        working-directory: wine-src
+        run: |
+          set -euo pipefail
+          bash build-scripts/build-step0-autogen.sh
+
       - name: Build Wine host tools
         working-directory: wine-src
         run: |
           set -euo pipefail
           bash build-scripts/build-step0.sh
 
-      - name: Apply GameNative Android source patches
-        working-directory: wine-src
-        run: |
-          set -euo pipefail
-          bash build-scripts/build-step-x86_64.sh --configure
-          git diff --check
-
-      - name: Download and verify upstream GameGuard compatibility patches
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p gg-patches
-          BASE='https://raw.githubusercontent.com/Krzysztof977/mu-online-linux/v0.1.0/patches'
-          names=(
-            0001-ntdll-ntloaddriver-scm.patch
-            0002-ntdll-wow64-stack-semantics.patch
-            0003-kernelbase-urlescape-sentinel.patch
-            0004-ntoskrnl-gameguard-compat.patch
-          )
-          sums=(
-            128398b6cc9a8be12771df8636e6ab5db96dc68c2ed4dc275045211354e79ab8
-            507dcf28948909a3d869b58f5ff1aa1272a1c6b6abeb2d42e6350c6ae9cad8a0
-            98478fac80966bffac650a76e870ba1a39a809eb5d20d783dd8486cb9b628572
-            d40695dcc32b3f2f5343e4bf1eef5ae7a212da4fdb0f454209f0c1d833721399
-          )
-          for i in "${!names[@]}"; do
-            curl -fL "$BASE/${names[$i]}" -o "gg-patches/${names[$i]}"
-            echo "${sums[$i]}  gg-patches/${names[$i]}" | sha256sum -c -
-          done
-
-      - name: Apply GameGuard compatibility patches
-        working-directory: wine-src
-        run: |
-          set -euo pipefail
-          for p in ../gg-patches/*.patch; do
-            echo "Applying $p"
-            if git apply --check "$p" 2>/dev/null; then
-              git apply "$p"
-            else
-              echo "GameGuard patch context drift; trying GNU patch: $p"
-              patch -p1 --forward --batch --fuzz=3 < "$p"
-            fi
-          done
-          git diff --check
-
-      - name: Apply 4Story Toolhelp heap-list implementation
-        run: |
-          set -euo pipefail
-          python3 apply_4story_toolhelp.py wine-src
-          grep -n 'fetch_heap_list' wine-src/dlls/kernel32/toolhelp.c
-          ! grep -q 'Unimplemented: heap list snapshot' wine-src/dlls/kernel32/toolhelp.c
-          grep -q '@ stdcall Heap32ListNext(long ptr)' wine-src/dlls/kernel32/kernel32.spec
-          git -C wine-src diff --check
-
-      - name: Reconfigure after compatibility patches
+      - name: Configure Android x86_64 with official GameNative patches
         working-directory: wine-src
         run: |
           set -euo pipefail
           bash build-scripts/build-step-x86_64.sh --configure
 
-      - name: Build Android x86_64 Wine
+      - name: Build Android x86_64
         working-directory: wine-src
         run: |
           set -euo pipefail
           bash build-scripts/build-step-x86_64.sh --build
+
+      - name: Install Android x86_64
+        working-directory: wine-src
+        run: |
+          set -euo pipefail
           bash build-scripts/build-step-x86_64.sh --install
 
-      - name: Package Bannerlator / Winlator WCP
-        shell: bash
+      - name: Package WCP
         run: |
           set -euo pipefail
           OUT="$HOME/compiled-files-x86_64"
-          test -x "$OUT/bin/wine" || { echo 'wine binary missing'; exit 1; }
-          test -d "$OUT/lib/wine" || { echo 'Wine library tree missing'; exit 1; }
+          test -x "$OUT/bin/wine"
+          test -d "$OUT/lib/wine"
 
-          curl -fL https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-x86_64-11.txz -o "$OUT/prefixPack.txz"
+          wget -q \
+            https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-x86_64-11.txz \
+            -O "$OUT/prefixPack.txz"
+
           cat > "$OUT/profile.json" <<'JSON'
           {
             "type": "Wine",
-            "versionName": "11.6-4story-gg-x86_64-v4",
-            "versionCode": 4,
-            "description": "Experimental Wine 11.6 Android x86_64 compatibility build for 4Story with GameGuard left enabled.",
+            "versionName": "11.0-4story-gg-x86_64-v5",
+            "versionCode": 5,
+            "description": "GameNative Proton 11 Android x86_64 with GameGuard compatibility work and Toolhelp heap-list support. GameGuard remains enabled.",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -208,17 +510,16 @@ jobs:
           JSON
 
           cd "$OUT"
-          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v4.wcp"             bin lib share prefixPack.txz profile.json
-          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v4.wcp.xz"             bin lib share prefixPack.txz profile.json
+          tar cJf "$GITHUB_WORKSPACE/4story-gamenative-p11-gg-x86_64-v5.wcp" \
+            bin lib share prefixPack.txz profile.json
           cd "$GITHUB_WORKSPACE"
-          sha256sum 4story-wine-11.6-gg-x86_64-v4.wcp* > SHA256SUMS
+          sha256sum 4story-gamenative-p11-gg-x86_64-v5.wcp > SHA256SUMS
 
-      - name: Upload build artifacts
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 4story-wine-11.6-gg-x86_64-v4
+          name: 4story-gamenative-p11-gg-x86_64-v5
           path: |
-            4story-wine-11.6-gg-x86_64-v4.wcp
-            4story-wine-11.6-gg-x86_64-v4.wcp.xz
+            4story-gamenative-p11-gg-x86_64-v5.wcp
             SHA256SUMS
           retention-days: 30
