@@ -1,4 +1,5 @@
-name: Build 4Story GameGuard Wine for Android x86_64
+# v2: fixes host-tools step (no autogen.sh in pristine Wine tarball) and uses GameNative x86_64 Wine 11 prefix pack.
+name: Build 4Story GameGuard Wine for Android x86_64 (v2)
 
 on:
   workflow_dispatch:
@@ -98,7 +99,7 @@ jobs:
         working-directory: wine-src
         run: |
           set -euo pipefail
-          bash autogen.sh
+          test -x ./configure
           bash build-scripts/build-step0.sh
 
       - name: Apply GameNative Android source patches
@@ -172,11 +173,11 @@ jobs:
           test -x "$OUT/bin/wine" || { echo 'wine binary missing'; exit 1; }
           test -d "$OUT/lib/wine" || { echo 'Wine library tree missing'; exit 1; }
 
-          curl -fL https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-x86_64.txz -o "$OUT/prefixPack.txz"
+          curl -fL https://github.com/GameNative/bionic-prefix-files/raw/main/prefixPack-x86_64-11.txz -o "$OUT/prefixPack.txz"
           cat > "$OUT/profile.json" <<'JSON'
           {
             "type": "Wine",
-            "versionName": "11.6-4story-gg-x86_64-v1",
+            "versionName": "11.6-4story-gg-x86_64-v2",
             "versionCode": 1,
             "description": "Wine 11.6 Android x86_64: upstream GameGuard compatibility patches plus Toolhelp heap-list implementation for 4Story testing. Does not modify or bypass GameGuard.",
             "files": [],
@@ -189,20 +190,20 @@ jobs:
           JSON
 
           cd "$OUT"
-          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v1.wcp" \
+          tar --zstd -cf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v2.wcp" \
             bin lib share prefixPack.txz profile.json
-          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v1.wcp.xz" \
+          tar -cJf "$GITHUB_WORKSPACE/4story-wine-11.6-gg-x86_64-v2.wcp.xz" \
             bin lib share prefixPack.txz profile.json
           cd "$GITHUB_WORKSPACE"
-          sha256sum 4story-wine-11.6-gg-x86_64-v1.wcp* > SHA256SUMS
-          ls -lh 4story-wine-11.6-gg-x86_64-v1.wcp*
+          sha256sum 4story-wine-11.6-gg-x86_64-v2.wcp* > SHA256SUMS
+          ls -lh 4story-wine-11.6-gg-x86_64-v2.wcp*
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 4story-wine-11.6-gg-x86_64-v1
+          name: 4story-wine-11.6-gg-x86_64-v2
           path: |
-            4story-wine-11.6-gg-x86_64-v1.wcp
-            4story-wine-11.6-gg-x86_64-v1.wcp.xz
+            4story-wine-11.6-gg-x86_64-v2.wcp
+            4story-wine-11.6-gg-x86_64-v2.wcp.xz
             SHA256SUMS
           retention-days: 30
