@@ -1,4 +1,4 @@
-name: Build 4Story GameGuard GameNative Proton 11 x86_64 v7
+name: Build 4Story GameGuard GameNative Proton 11 x86_64 v8
 
 on:
   workflow_dispatch:
@@ -360,24 +360,24 @@ jobs:
               PEB peb;
               ULONG i;
               BOOL ret = FALSE;
-          
+
               *heap_list = NULL;
               *num = 0;
               if (!(flags & TH32CS_SNAPHEAPLIST)) return TRUE;
-          
+
               if (process)
               {
                   hProcess = OpenProcess( PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, process );
                   if (!hProcess) return FALSE;
               }
               else hProcess = GetCurrentProcess();
-          
+
               if (!set_ntstatus( NtQueryInformationProcess( hProcess, ProcessBasicInformation,
                                                   &pbi, sizeof(pbi), NULL )))
                   goto out;
               if (!ReadProcessMemory( hProcess, pbi.PebBaseAddress, &peb, sizeof(peb), NULL ))
                   goto out;
-          
+
               if (!peb.NumberOfHeaps)
               {
                   ret = TRUE;
@@ -388,7 +388,7 @@ jobs:
                   SetLastError( ERROR_BAD_LENGTH );
                   goto out;
               }
-          
+
               heaps = HeapAlloc( GetProcessHeap(), 0, peb.NumberOfHeaps * sizeof(*heaps) );
               if (!heaps)
               {
@@ -398,7 +398,7 @@ jobs:
               if (!ReadProcessMemory( hProcess, peb.ProcessHeaps, heaps,
                             peb.NumberOfHeaps * sizeof(*heaps), NULL ))
                   goto out;
-          
+
               *heap_list = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY,
                             peb.NumberOfHeaps * sizeof(**heap_list) );
               if (!*heap_list)
@@ -406,7 +406,7 @@ jobs:
                   SetLastError( ERROR_NOT_ENOUGH_MEMORY );
                   goto out;
               }
-          
+
               for (i = 0; i < peb.NumberOfHeaps; ++i)
               {
                   (*heap_list)[i].dwSize = sizeof(HEAPLIST32);
@@ -414,10 +414,10 @@ jobs:
                   (*heap_list)[i].th32HeapID = (ULONG_PTR)heaps[i];
                   (*heap_list)[i].dwFlags = (heaps[i] == peb.ProcessHeap) ? HF32_DEFAULT : 0;
               }
-          
+
               *num = peb.NumberOfHeaps;
               ret = TRUE;
-          
+
           out:
               if (!ret)
               {
@@ -429,7 +429,7 @@ jobs:
               if (process) CloseHandle( hProcess );
               return ret;
           }
-          
+
           static void fill_heap_list( struct snapshot *snap, ULONG *offset, HEAPLIST32 *heap_list, ULONG num )
           {
               snap->heap_count = num;
@@ -439,7 +439,7 @@ jobs:
               memcpy( &snap->data[*offset], heap_list, num * sizeof(*heap_list) );
               *offset += num * sizeof(*heap_list);
           }
-          
+
           '''
           text = text.replace(anchor, helpers + anchor, 1)
 
@@ -514,14 +514,14 @@ jobs:
           {
               struct snapshot *snap;
               BOOL ret = FALSE;
-          
+
               if (lphl->dwSize < sizeof(HEAPLIST32))
               {
                   SetLastError( ERROR_INSUFFICIENT_BUFFER );
                   WARN("Result buffer too small (%lu)\\n", lphl->dwSize );
                   return FALSE;
               }
-          
+
               if ((snap = MapViewOfFile( hSnapshot, FILE_MAP_ALL_ACCESS, 0, 0, 0 )))
               {
                   if (first) snap->heap_pos = 0;
@@ -536,7 +536,7 @@ jobs:
               }
               return ret;
           }
-          
+
           /************************************************************************
            *              Heap32ListFirst (KERNEL32.@)
            */
@@ -544,7 +544,7 @@ jobs:
           {
               return heap_list_next( hSnapshot, lphl, TRUE );
           }
-          
+
           /************************************************************************
            *              Heap32ListNext (KERNEL32.@)
            */
@@ -636,10 +636,10 @@ jobs:
 
           cat > "$OUT/profile.json" <<'JSON'
           {
-            "type": "Wine",
-            "versionName": "11.0-4story-gg-x86_64-v7",
-            "versionCode": 7,
-            "description": "GameNative Proton 11 Android x86_64 with GameGuard compatibility work and Toolhelp heap-list support. GameGuard remains enabled.",
+            "type": "Proton",
+            "versionName": "11.0-407-x86_64",
+            "versionCode": 8,
+            "description": "GameNative Proton 11 Android x86_64 - 4Story GameGuard compatibility v8. GameGuard remains enabled.",
             "files": [],
             "wine": {
               "binPath": "bin",
@@ -650,16 +650,16 @@ jobs:
           JSON
 
           cd "$OUT"
-          tar cJf "$GITHUB_WORKSPACE/4story-gamenative-p11-gg-x86_64-v7.wcp" \
+          tar cJf "$GITHUB_WORKSPACE/4story-gamenative-p11-gg-x86_64-v8.wcp" \
             bin lib share prefixPack.txz profile.json
           cd "$GITHUB_WORKSPACE"
-          sha256sum 4story-gamenative-p11-gg-x86_64-v7.wcp > SHA256SUMS
+          sha256sum 4story-gamenative-p11-gg-x86_64-v8.wcp > SHA256SUMS
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: 4story-gamenative-p11-gg-x86_64-v7
+          name: 4story-gamenative-p11-gg-x86_64-v8
           path: |
-            4story-gamenative-p11-gg-x86_64-v7.wcp
+            4story-gamenative-p11-gg-x86_64-v8.wcp
             SHA256SUMS
           retention-days: 30
